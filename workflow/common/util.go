@@ -234,6 +234,46 @@ func GetExecutorOutput(exec remotecommand.Executor) (*bytes.Buffer, *bytes.Buffe
 	return &stdOut, &stdErr, nil
 }
 
+const prefixForGeneratedPaths = "/tmp/argo/"
+
+// GenerateInputArtifactPath generates local path for an input artifact file
+func GenerateInputArtifactPath(name string) string {
+	return prefixForGeneratedPaths + "input_artifacts/" + name + "/data"
+}
+
+// GenerateOutputArtifactPath generates local path for an output artifact file
+func GenerateOutputArtifactPath(name string) string {
+	return prefixForGeneratedPaths + "output_artifacts/" + name + "/data"
+}
+
+// GenerateOutputParameterPath generates local path for an output parameter file
+func GenerateOutputParameterPath(name string) string {
+	return prefixForGeneratedPaths + "output_parameters/" + name + "/data"
+}
+
+func generateMissingLocalDataPaths(tmpl *wfv1.Template) {
+	if !tmpl.IsLeaf() {
+		return
+	}
+	for i, inArt := range tmpl.Inputs.Artifacts {
+		if inArt.Path == "" {
+			tmpl.Inputs.Artifacts[i].Path = GenerateInputArtifactPath(inArt.Name)
+		}
+	}
+	for i, outArt := range tmpl.Outputs.Artifacts {
+		if outArt.Path == "" {
+			tmpl.Outputs.Artifacts[i].Path = GenerateOutputArtifactPath(outArt.Name)
+		}
+	}
+	for i, outParam := range tmpl.Outputs.Parameters {
+		if outParam.ValueFrom == nil {
+			tmpl.Outputs.Parameters[i].ValueFrom = &wfv1.ValueFrom{
+				Path: GenerateOutputParameterPath(outParam.Name),
+			}
+		}
+	}
+}
+
 // ProcessArgs sets in the inputs, the values either passed via arguments, or the hardwired values
 // It substitutes:
 // * parameters in the template from the arguments
@@ -289,6 +329,9 @@ func ProcessArgs(tmpl *wfv1.Template, args wfv1.Arguments, globalParams, localPa
 		}
 	}
 	tmpl.Inputs.Artifacts = newInputArtifacts
+
+	// generating input/output file paths if they're not specified
+	generateMissingLocalDataPaths(tmpl)
 
 	return substituteParams(tmpl, globalParams, localParams)
 }

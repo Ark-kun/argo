@@ -134,14 +134,10 @@ func (ctx *wfValidationCtx) validateTemplate(tmpl *wfv1.Template, args wfv1.Argu
 	}
 	if tmpl.IsLeaf() {
 		for _, art := range tmpl.Outputs.Artifacts {
-			if art.Path != "" {
-				scope[fmt.Sprintf("outputs.artifacts.%s.path", art.Name)] = true
-			}
+			scope[fmt.Sprintf("outputs.artifacts.%s.path", art.Name)] = true
 		}
 		for _, param := range tmpl.Outputs.Parameters {
-			if param.ValueFrom != nil && param.ValueFrom.Path != "" {
-				scope[fmt.Sprintf("outputs.parameters.%s.path", param.Name)] = true
-			}
+			scope[fmt.Sprintf("outputs.parameters.%s.path", param.Name)] = true
 		}
 	}
 
@@ -216,9 +212,6 @@ func validateInputs(tmpl *wfv1.Template) (map[string]interface{}, error) {
 		artRef := fmt.Sprintf("inputs.artifacts.%s", art.Name)
 		scope[artRef] = true
 		if tmpl.IsLeaf() {
-			if art.Path == "" {
-				return nil, errors.Errorf(errors.CodeBadRequest, "templates.%s.%s.path not specified", tmpl.Name, artRef)
-			}
 			scope[fmt.Sprintf("inputs.artifacts.%s.path", art.Name)] = true
 		} else {
 			if art.Path != "" {
@@ -319,10 +312,12 @@ func validateLeaf(scope map[string]interface{}, tmpl *wfv1.Template) error {
 			mountPaths[volMount.MountPath] = fmt.Sprintf("container.volumeMounts.%s", volMount.Name)
 		}
 		for i, art := range tmpl.Inputs.Artifacts {
-			if prev, ok := mountPaths[art.Path]; ok {
-				return errors.Errorf(errors.CodeBadRequest, "templates.%s.inputs.artifacts[%d].path '%s' already mounted in %s", tmpl.Name, i, art.Path, prev)
+			if art.Path != "" {
+				if prev, ok := mountPaths[art.Path]; ok {
+					return errors.Errorf(errors.CodeBadRequest, "templates.%s.inputs.artifacts[%d].path '%s' already mounted in %s", tmpl.Name, i, art.Path, prev)
+				}
+				mountPaths[art.Path] = fmt.Sprintf("inputs.artifacts.%s", art.Name)
 			}
-			mountPaths[art.Path] = fmt.Sprintf("inputs.artifacts.%s", art.Name)
 		}
 	}
 	if tmpl.ActiveDeadlineSeconds != nil {
@@ -521,11 +516,7 @@ func validateOutputs(scope map[string]interface{}, tmpl *wfv1.Template) error {
 
 	for _, art := range tmpl.Outputs.Artifacts {
 		artRef := fmt.Sprintf("outputs.artifacts.%s", art.Name)
-		if tmpl.IsLeaf() {
-			if art.Path == "" {
-				return errors.Errorf(errors.CodeBadRequest, "templates.%s.%s.path not specified", tmpl.Name, artRef)
-			}
-		} else {
+		if !tmpl.IsLeaf() {
 			if art.Path != "" {
 				return errors.Errorf(errors.CodeBadRequest, "templates.%s.%s.path only valid in container/script templates", tmpl.Name, artRef)
 			}
@@ -539,26 +530,9 @@ func validateOutputs(scope map[string]interface{}, tmpl *wfv1.Template) error {
 	}
 	for _, param := range tmpl.Outputs.Parameters {
 		paramRef := fmt.Sprintf("templates.%s.outputs.parameters.%s", tmpl.Name, param.Name)
-		err = validateOutputParameter(paramRef, &param)
+		err = validateOutputParameter(paramRef, &param, tmpl.GetType())
 		if err != nil {
 			return err
-		}
-		if param.ValueFrom != nil {
-			tmplType := tmpl.GetType()
-			switch tmplType {
-			case wfv1.TemplateTypeContainer, wfv1.TemplateTypeScript:
-				if param.ValueFrom.Path == "" {
-					return errors.Errorf(errors.CodeBadRequest, "%s.path must be specified for %s templates", paramRef, tmplType)
-				}
-			case wfv1.TemplateTypeResource:
-				if param.ValueFrom.JQFilter == "" && param.ValueFrom.JSONPath == "" {
-					return errors.Errorf(errors.CodeBadRequest, "%s .jqFilter or jsonPath must be specified for %s templates", paramRef, tmplType)
-				}
-			case wfv1.TemplateTypeDAG, wfv1.TemplateTypeSteps:
-				if param.ValueFrom.Parameter == "" {
-					return errors.Errorf(errors.CodeBadRequest, "%s.parameter must be specified for %s templates", paramRef, tmplType)
-				}
-			}
 		}
 		if param.GlobalName != "" && !isParameter(param.GlobalName) {
 			errs := isValidParamOrArtifactName(param.GlobalName)
@@ -579,11 +553,15 @@ func (ctx *wfValidationCtx) validateBaseImageOutputs(tmpl *wfv1.Template) error 
 		// pns supports copying from the base image, but only if there is no volume mount underneath it
 		errMsg := "pns executor does not support outputs from base image layer with volume mounts. must use emptyDir"
 		for _, out := range tmpl.Outputs.Artifacts {
-			if common.FindOverlappingVolume(tmpl, out.Path) == nil {
+			artPath := out.Path
+			if artPath == "" {
+				artPath = common.GenerateOutputArtifactPath(out.Name)
+			}
+			if common.FindOverlappingVolume(tmpl, artPath) == nil {
 				// output is in the base image layer. need to verify there are no volume mounts under it
 				if tmpl.Container != nil {
 					for _, volMnt := range tmpl.Container.VolumeMounts {
-						if strings.HasPrefix(volMnt.MountPath, out.Path+"/") {
+						if strings.HasPrefix(volMnt.MountPath, artPath+"/") {
 							return errors.Errorf(errors.CodeBadRequest, "templates.%s.outputs.artifacts.%s: %s", tmpl.Name, out.Name, errMsg)
 						}
 					}
@@ -591,7 +569,7 @@ func (ctx *wfValidationCtx) validateBaseImageOutputs(tmpl *wfv1.Template) error 
 				}
 				if tmpl.Script != nil {
 					for _, volMnt := range tmpl.Container.VolumeMounts {
-						if strings.HasPrefix(volMnt.MountPath, out.Path+"/") {
+						if strings.HasPrefix(volMnt.MountPath, artPath+"/") {
 							return errors.Errorf(errors.CodeBadRequest, "templates.%s.outputs.artifacts.%s: %s", tmpl.Name, out.Name, errMsg)
 						}
 					}
@@ -602,12 +580,22 @@ func (ctx *wfValidationCtx) validateBaseImageOutputs(tmpl *wfv1.Template) error 
 		// for kubelet/k8s fail validation if we detect artifact is copied from base image layer
 		errMsg := fmt.Sprintf("%s executor does not support outputs from base image layer. must use emptyDir", ctx.ContainerRuntimeExecutor)
 		for _, out := range tmpl.Outputs.Artifacts {
-			if common.FindOverlappingVolume(tmpl, out.Path) == nil {
+			artPath := out.Path
+			if artPath == "" {
+				artPath = common.GenerateOutputArtifactPath(out.Name)
+			}
+			if common.FindOverlappingVolume(tmpl, artPath) == nil {
 				return errors.Errorf(errors.CodeBadRequest, "templates.%s.outputs.artifacts.%s: %s", tmpl.Name, out.Name, errMsg)
 			}
 		}
 		for _, out := range tmpl.Outputs.Parameters {
-			if out.ValueFrom != nil && common.FindOverlappingVolume(tmpl, out.ValueFrom.Path) == nil {
+			paramPath := ""
+			if out.ValueFrom == nil {
+				paramPath = "/tmp/argo/output_parameters/" + out.Name + "/data"
+			} else {
+				paramPath = out.ValueFrom.Path
+			}
+			if paramPath != "" && common.FindOverlappingVolume(tmpl, paramPath) == nil {
 				return errors.Errorf(errors.CodeBadRequest, "templates.%s.outputs.parameters.%s: %s", tmpl.Name, out.Name, errMsg)
 			}
 		}
@@ -616,14 +604,17 @@ func (ctx *wfValidationCtx) validateBaseImageOutputs(tmpl *wfv1.Template) error 
 }
 
 // validateOutputParameter verifies that only one of valueFrom is defined in an output
-func validateOutputParameter(paramRef string, param *wfv1.Parameter) error {
-	if param.ValueFrom != nil && param.Value != nil {
-		return errors.Errorf(errors.CodeBadRequest, "%s has both valueFrom and value specified. Choose one.", paramRef)
-	}
+func validateOutputParameter(paramRef string, param *wfv1.Parameter, tmplType wfv1.TemplateType) error {
 	if param.Value != nil {
+		if param.ValueFrom != nil {
+			return errors.Errorf(errors.CodeBadRequest, "%s has both valueFrom and value specified. Choose one.", paramRef)
+		}
 		return nil
 	}
 	if param.ValueFrom == nil {
+		if tmplType == wfv1.TemplateTypeContainer || tmplType == wfv1.TemplateTypeScript {
+			return nil
+		}
 		return errors.Errorf(errors.CodeBadRequest, "%s does not have valueFrom or value specified", paramRef)
 	}
 	paramTypes := 0
@@ -639,6 +630,22 @@ func validateOutputParameter(paramRef string, param *wfv1.Parameter) error {
 	default:
 		return errors.New(errors.CodeBadRequest, "multiple valueFrom types specified. choose one of: path, jqFilter, jsonPath, parameter")
 	}
+
+	switch tmplType {
+	case wfv1.TemplateTypeContainer, wfv1.TemplateTypeScript:
+		if param.ValueFrom.Path == "" {
+			return errors.Errorf(errors.CodeBadRequest, "%s has valueFrom attribute that is invalid for %s templates. Only .path is supported.", paramRef, tmplType)
+		}
+	case wfv1.TemplateTypeResource:
+		if param.ValueFrom.JQFilter == "" && param.ValueFrom.JSONPath == "" {
+			return errors.Errorf(errors.CodeBadRequest, "%s .jqFilter or jsonPath must be specified for %s templates", paramRef, tmplType)
+		}
+	case wfv1.TemplateTypeDAG, wfv1.TemplateTypeSteps:
+		if param.ValueFrom.Parameter == "" {
+			return errors.Errorf(errors.CodeBadRequest, "%s.parameter must be specified for %s templates", paramRef, tmplType)
+		}
+	}
+
 	return nil
 }
 

@@ -601,23 +601,6 @@ spec:
           path: /tmp/hello_world.txt
 `
 
-var invalidOutputMissingValueFrom = `
-apiVersion: argoproj.io/v1alpha1
-kind: Workflow
-metadata:
-  generateName: output-param-
-spec:
-  entrypoint: whalesay
-  templates:
-  - name: whalesay
-    container:
-      image: docker/whalesay:latest
-      command: [sh, -c]
-      args: ["cowsay hello world | tee /tmp/hello_world.txt"]
-    outputs:
-      parameters:
-      - name: outparam
-`
 var invalidOutputMultipleValueFrom = `
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
@@ -693,17 +676,13 @@ func TestInvalidOutputParam(t *testing.T) {
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), invalidErr)
 	}
-	err = validate(invalidOutputMissingValueFrom)
-	if assert.NotNil(t, err) {
-		assert.Contains(t, err.Error(), "does not have valueFrom or value specified")
-	}
 	err = validate(invalidOutputMultipleValueFrom)
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), "multiple valueFrom")
 	}
 	err = validate(invalidOutputIncompatibleValueFromPath)
 	if assert.NotNil(t, err) {
-		assert.Contains(t, err.Error(), ".path must be specified for Container templates")
+		assert.Contains(t, err.Error(), "has valueFrom attribute that is invalid for Container templates")
 	}
 	err = validate(invalidOutputIncompatibleValueFromParam)
 	if assert.NotNil(t, err) {
